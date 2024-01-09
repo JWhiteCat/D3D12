@@ -51,7 +51,7 @@ private:
 
 struct GRS_VERTEX
 {
-	XMFLOAT3 position;
+	XMFLOAT4 position;
 	XMFLOAT4 color;
 };
 
@@ -90,13 +90,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
 	HWND hWnd = nullptr;
 	MSG  msg = {};
+	TCHAR pszAppPath[MAX_PATH] = {};
 
-	float fAspectRatio = 3.0f;
+	float fTrangleSize = 3.0f;
 
 	D3D12_VERTEX_BUFFER_VIEW stVertexBufferView = {};
 
 	UINT64 n64FenceValue = 0ui64;
-	HANDLE hFenceEvent = nullptr;
+	HANDLE hEventFence = nullptr;
 
 
 	D3D12_VIEWPORT						stViewPort = { 0.0f, 0.0f, static_cast<float>(iWidth), static_cast<float>(iHeight), D3D12_MIN_DEPTH, D3D12_MAX_DEPTH };
@@ -122,6 +123,32 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 	ComPtr<ID3D12Fence>                  pIFence;
 
 	MyRegisterClass(hInstance);
+
+	// 得到当前的工作目录，方便我们使用相对路径来访问各种资源文件
+	{
+		if (0 == ::GetModuleFileName(nullptr, pszAppPath, MAX_PATH))
+		{
+			GRS_THROW_IF_FAILED(HRESULT_FROM_WIN32(GetLastError()));
+		}
+
+		WCHAR* lastSlash = _tcsrchr(pszAppPath, _T('\\'));
+		if (lastSlash)
+		{
+			*(lastSlash) = _T('\0');
+		}
+
+		lastSlash = _tcsrchr(pszAppPath, _T('\\'));
+		if (lastSlash)
+		{
+			*(lastSlash) = _T('\0');
+		}
+
+		lastSlash = _tcsrchr(pszAppPath, _T('\\'));
+		if (lastSlash)
+		{
+			*(lastSlash + 1) = _T('\0');
+		}
+	}
 
 	// 创建窗口
 	{
@@ -307,6 +334,164 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 				, pICMDAlloc.Get()
 				, pIPipelineState.Get()
 				, IID_PPV_ARGS(&pICMDList)));
+		}
+
+		// 编译Shader创建渲染管线状态对象
+		{
+			ComPtr<ID3DBlob> pIBlobVertexShader;
+			ComPtr<ID3DBlob> pIBlobPixelShader;
+
+#if defined(_DEBUG)
+			//调试状态下，打开Shader编译的调试标志，不优化
+			UINT nCompileFlags =
+				D3DCOMPILE_DEBUG
+				| D3DCOMPILE_SKIP_OPTIMIZATION;
+#else
+			UINT nCompileFlags = 0;
+#endif
+			TCHAR pszShaderFileName[MAX_PATH] = {};
+			StringCchPrintf(pszShaderFileName
+				, MAX_PATH
+				, _T("%s1-D3D12Triangle\\Shader\\shaders.hlsl")
+				, pszAppPath);
+
+			GRS_THROW_IF_FAILED(D3DCompileFromFile(pszShaderFileName
+				, nullptr
+				, nullptr
+				, "VSMain"
+				, "vs_5_0"
+				, nCompileFlags
+				, 0
+				, &pIBlobVertexShader
+				, nullptr));
+
+			GRS_THROW_IF_FAILED(D3DCompileFromFile(pszShaderFileName
+				, nullptr
+				, nullptr
+				, "PSMain"
+				, "ps_5_0"
+				, nCompileFlags
+				, 0
+				, &pIBlobPixelShader
+				, nullptr));
+
+			D3D12_INPUT_ELEMENT_DESC stInputElementDescs[] =
+			{
+				{
+					"POSITION"
+					, 0
+					, DXGI_FORMAT_R32G32B32A32_FLOAT
+					, 0
+					, 0
+					, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA
+					, 0
+				},
+				{
+					"COLOR"
+					, 0
+					, DXGI_FORMAT_R32G32B32A32_FLOAT
+					, 0
+					, 0
+					, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA
+					, 0
+				}
+			};
+
+			// 定义渲染管线状态描述结构，创建渲染管线对象
+			D3D12_GRAPHICS_PIPELINE_STATE_DESC stPSODesc = {};
+			stPSODesc.InputLayout = { stInputElementDescs, _countof(stInputElementDescs) };
+			stPSODesc.pRootSignature = pIRootSignature.Get();
+			stPSODesc.VS.pShaderBytecode = pIBlobVertexShader->GetBufferPointer();
+			stPSODesc.VS.BytecodeLength = pIBlobVertexShader->GetBufferSize();
+			stPSODesc.PS.pShaderBytecode = pIBlobPixelShader->GetBufferPointer();
+			stPSODesc.PS.BytecodeLength = pIBlobPixelShader->GetBufferSize();
+
+			stPSODesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+			stPSODesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+
+			stPSODesc.BlendState.AlphaToCoverageEnable = FALSE;
+			stPSODesc.BlendState.IndependentBlendEnable = FALSE;
+			stPSODesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+			stPSODesc.DepthStencilState.DepthEnable = FALSE;
+			stPSODesc.DepthStencilState.StencilEnable = FALSE;
+
+			stPSODesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+
+			stPSODesc.NumRenderTargets = 1;
+			stPSODesc.RTVFormats[0] = emRenderTargetFormat;
+
+			stPSODesc.SampleMask = UINT_MAX;
+			stPSODesc.SampleDesc.Count = 1;
+
+			GRS_THROW_IF_FAILED(pID3D12Device4->CreateGraphicsPipelineState(&stPSODesc, IID_PPV_ARGS(&pIPipelineState)));
+		}
+
+		// 创建顶点缓冲
+		{
+
+			GRS_VERTEX stTriangleVertices[] =
+			{
+				{ { 0.0f, 0.25f * fTrangleSize, 0.0f ,1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+				{ { 0.25f * fTrangleSize, -0.25f * fTrangleSize, 0.0f ,1.0f  }, { 0.0f, 1.0f, 0.0f, 1.0f } },
+				{ { -0.25f * fTrangleSize, -0.25f * fTrangleSize, 0.0f  ,1.0f }, { 0.0f, 0.0f, 1.0f, 1.0f } }
+			};
+
+			const UINT nVertexBufferSize = sizeof(stTriangleVertices);
+
+			D3D12_HEAP_PROPERTIES stHeapProp = { D3D12_HEAP_TYPE_UPLOAD };
+
+			D3D12_RESOURCE_DESC stResDesc = {};
+			stResDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+			stResDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+			stResDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+			stResDesc.Format = DXGI_FORMAT_UNKNOWN;
+			stResDesc.Width = nVertexBufferSize;
+			stResDesc.Height = 1;
+			stResDesc.DepthOrArraySize = 1;
+			stResDesc.MipLevels = 1;
+			stResDesc.SampleDesc.Count = 1;
+			stResDesc.SampleDesc.Quality = 0;
+
+			GRS_THROW_IF_FAILED(pID3D12Device4->CreateCommittedResource(
+				&stHeapProp,
+				D3D12_HEAP_FLAG_NONE,
+				&stResDesc,
+				D3D12_RESOURCE_STATE_GENERIC_READ,
+				nullptr,
+				IID_PPV_ARGS(&pIVertexBuffer)));
+
+			UINT8* pVertexDataBegin = nullptr;
+			D3D12_RANGE stReadRange = { 0,0 };
+			GRS_THROW_IF_FAILED(pIVertexBuffer->Map(
+				0
+				, &stReadRange
+				, reinterpret_cast<void**>(&pVertexDataBegin)));
+
+
+			memcpy(pVertexDataBegin
+				, stTriangleVertices
+				, sizeof(stTriangleVertices));
+
+			pIVertexBuffer->Unmap(0, nullptr);
+
+			stVertexBufferView.BufferLocation = pIVertexBuffer->GetGPUVirtualAddress();
+			stVertexBufferView.StrideInBytes = sizeof(GRS_VERTEX);
+			stVertexBufferView.SizeInBytes = nVertexBufferSize;
+		}
+
+		// 创建一个同步对象——围栏，用于等待渲染完成，因为现在Draw Call是异步的了
+		{
+			GRS_THROW_IF_FAILED(pID3D12Device4->CreateFence(0
+				, D3D12_FENCE_FLAG_NONE
+				, IID_PPV_ARGS(&pIFence)));
+			n64FenceValue = 1;
+
+			hEventFence = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+			if (hEventFence == nullptr)
+			{
+				GRS_THROW_IF_FAILED(HRESULT_FROM_WIN32(GetLastError()));
+			}
 		}
 	}
 
